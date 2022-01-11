@@ -8,8 +8,8 @@ Unprocessed EEG data is contained int the RAW_EEG folder, while the normalized E
 ## Autoencoder Feature Generation
 ![Autoencoder-subject-9](results/subject_9_EEG_channel_1_raw.png)
 
-## Classifying Stress Level
+## Classifying Stress Level [100 ms timewindows; low/med/high]
 ![stress-level-subject-9](results/subject_9_EEG_encoded_labels_100ms_8_features_3_classes.png)
 
-## Classifying Stress Transition
+## Classifying Stress Transition [100 ms timewindows; decrease/no-change/increase]
 ![stress-transition-subject-9](results/subject_9_EEG_encoded_transitions_100ms_8_features.png)
