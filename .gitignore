@@ -2,5 +2,5 @@
 *.mat
 /__pycache__/
 .idea
-/RAW_EEG/
-/EEG_FT_DATA/
+/RAW_EEG/*.csv
+/EEG_FT_DATA/*.csv
