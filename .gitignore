@@ -3,4 +3,9 @@
 /__pycache__/
 .idea
 /RAW_EEG/*.csv
+/RAW_EEG/*/
+/RAW
 /EEG_FT_DATA/*.csv
+.ipynb_checkpoints/
+*.zip
+*/__pycache__/*
