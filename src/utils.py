@@ -61,7 +61,7 @@ def normalize_and_crop(eeg: np.array, ft: np.array) -> tuple:
     return new_eeg, new_ft
 
 
-def create_dataset(src_dir: str) -> None:
+def create_dataset(src_dir: str, out_dir = 'EEG_FT_DATA') -> None:
     """
     :param src_dir: the directory containing all the EEG and FeelTrace data in folders for each subject
 
@@ -71,18 +71,19 @@ def create_dataset(src_dir: str) -> None:
     subject_data_dir = glob.glob(os.path.join(src_dir, 'p*'))
 
     subject_data = [glob.glob(os.path.join(x, '*')) for x in subject_data_dir]
-    all_eeg_data = [x[21] for x in subject_data]
-    all_joystick_data = [x[15] for x in subject_data]
 
-    # this next step takes a bit of time!!
+    all_eeg_data = [ next(filter(lambda item: 'eeg.mat' in item and 'eeg_eeg.mat' not in item, x))for x in subject_data] # find all eeg.mat
+    all_joystick_data = [ next(filter(lambda item: 'joystick.mat' in item and 'joystick_joystick.mat' not in item, x)) for x in subject_data] # final all joystick.mat
+
+    # the next steps takes a bit of time!!
     eeg_ft_pairs = [(eeg, ft) for eeg, ft in zip(all_eeg_data, all_joystick_data)]
 
     with tqdm_joblib(tqdm(desc="Dataset Creation", total=len(eeg_ft_pairs))) as progress_bar:
-        Parallel(n_jobs=8)(delayed(write_to_csv_dataset_loop)(i, x, y) for i, (x, y) in enumerate(eeg_ft_pairs))
-    print('Done! Created dataset in EEG_FT_DATA')
+        Parallel(n_jobs=8)(delayed(write_to_csv_dataset_loop)(i, x, y, out_dir) for i, (x, y) in enumerate(eeg_ft_pairs))
+    print(f'Created dataset initial dataset csv in {out_dir}')
 
 
-def write_to_csv_dataset_loop(index: int, x: str, y: str) -> None:
+def write_to_csv_dataset_loop(index: int, x: str, y: str, out_dir) -> None:
     """
     Should not be called by the user, for pair at index, create the pandas dataframe and write to a csv file
     :param y: FeelTrace filename
@@ -99,8 +100,8 @@ def write_to_csv_dataset_loop(index: int, x: str, y: str) -> None:
     eeg_df = pd.DataFrame(data=normalized_eeg, columns=eeg_column_headers)
     ft_df = pd.DataFrame(data=normalized_ft, columns=ft_column_headers)
 
-    eeg_df.to_csv(os.path.join('../EEG_FT_DATA', f'normalized_eeg_{index}.csv'), index=False)
-    ft_df.to_csv(os.path.join('../EEG_FT_DATA', f'normalized_ft_{index}.csv'), index=False)
+    eeg_df.to_csv(os.path.join(out_dir, f'normalized_eeg_{index}.csv'), index=False)
+    ft_df.to_csv(os.path.join(out_dir, f'normalized_ft_{index}.csv'), index=False)
 
 
 def create_filled_lables(ft_df, eeg_df):
@@ -130,7 +131,7 @@ def save_aligned_dataset(eeg_ft_dir = 'EEG_FT_DATA', output_dir='ALIGNED_DATA'):
     """
     subject_data_files = glob.glob(os.path.join(eeg_ft_dir, '*.csv'))
     # sort the files by the index given to them
-    file_name_2_index = lambda file : int(file.split('.')[0].split('_')[-1])
+    file_name_2_index = lambda file : int(file.split('.csv')[0].split('_')[-1])
     subject_data_files.sort() # sort alphabetically
     subject_data_files.sort(key=file_name_2_index) # sort by index
     # group the eeg and ft into pairs
@@ -155,3 +156,4 @@ def save_aligned_dataset(eeg_ft_dir = 'EEG_FT_DATA', output_dir='ALIGNED_DATA'):
         del input_label_pair
         
         index += 1
+    print(f'Done! Created final dataset in {output_dir}')
