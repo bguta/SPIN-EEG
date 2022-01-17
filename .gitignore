@@ -9,3 +9,6 @@
 .ipynb_checkpoints/
 *.zip
 */__pycache__/*
+*.pth
+Experiments/*.png
+Experiments/*.json

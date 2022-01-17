@@ -11,7 +11,8 @@ from sklearn.metrics import precision_recall_fscore_support
 
 from tqdm import tqdm
 import time
-
+import argparse
+import json
 from eeg_utils import *
 
 
@@ -162,7 +163,6 @@ def train(model, num_epochs, batch_size, learning_rate, train_split, test_split,
 
 
 
-import argparse
 if __name__ == "__main__":
     argparser = argparse.ArgumentParser(description='Train a classifier model to classify emotion state from EEG data using the raw features from the 64 channel EEG')
 
@@ -171,6 +171,7 @@ if __name__ == "__main__":
     argparser.add_argument('--data_split_seed', type=int, default=-1, help='Integer Seed for choosing the datasplit, if -1 uses a random number')
     argparser.add_argument('--num_subjects',  type=int, default=1, help='Number of subjects to include in the dataset, minimum and default is 1 and maximum is 15. Loading large number of users may fail due to memory limitations')
     argparser.add_argument('--subject_seed',  type=int, default=-1, help='Integer seed for choosing the subjects, if -1 uses a random number')
+    argparser.add_argument('--eeg_low_pass', type=int, default=None, help='-3 dB point frequency (Hz) for non-causal low pass filter, by default no filter is applied')
     argparser.add_argument('--classifier_hidden_size',  type=int, default=32, help='Integer LSTM parameter default value is 32, the larger the more complicated the model')
     argparser.add_argument('--classifier_classes',  type=int, default=3, help='Integer number of ouputs for the classifier default value is 3, the interval [0,1] is split into the number of chosen classes')
     argparser.add_argument('--classifier_dropout',  type=float, default=0.0, help='Dropout probability, useful for regularization [0,1] default 0.0')
@@ -180,9 +181,13 @@ if __name__ == "__main__":
     argparser.add_argument('--training_batch_size',  type=int, default=512, help='Integer batch size for each input during default 512')
     argparser.add_argument('--training_lr',  type=float, default=1e-3, help='Inital learning rate for the model, default 0.001')
 
+    argparser.add_argument('--encoder_path', type=str, default=None, help='Path to the pretrained encoder model to generate the features default is None (no encoder is used), example /path/to/cnn_ae_model.pth')
+    argparser.add_argument('--encoder_features', type=int, default=8, help='Integer Autoencoder encoding size for pretrained encoder model default value is 8')
+
     argparser.add_argument('--training_resume_path', type=str, default=None, help='Path to the pretrained model to resume training, example /path/to/cnn_ae_model.pth')
     argparser.add_argument('--training_save_path', type=str, default=None, help='Path to save the trained model to, example /path/to/cnn_ae_model.pth')
-
+    argparser.add_argument('--skip_prompt', type=int, default=0, help='skip ready to train prompt option 0(false) or 1(true), default 0')
+    
     args = argparser.parse_args()
 
     ### run
@@ -195,58 +200,74 @@ if __name__ == "__main__":
     print(f'subject_seed: {subject_choice_seed}')
 
     num_subjects = args.num_subjects
-    if num_subjects < 1 or num_subjects > 15:
+    if num_subjects < 1 or num_subjects > 16:
         print(f"Number chosen subjects {num_subjects} is out of bounds, using 1")
         num_subjects = 1
-
+    
+    cutoff_lf = args.eeg_low_pass
     # load dataset with no low pass filter applied
-    dataset = load_and_split_dataset(eeg_ft_dir = args.eeg_dir, split_size=args.time_window, cutoff_lf=None, random_seed=random_seed, num_subjects = num_subjects, subject_choice_seed=subject_choice_seed)
+    dataset = load_and_split_dataset(eeg_ft_dir = args.eeg_dir, split_size=args.time_window, cutoff_lf=cutoff_lf, random_seed=random_seed, num_subjects = num_subjects, subject_choice_seed=subject_choice_seed)
 
     classifier_train, classifier_val, classifier_test = dataset[6:9]
     classifier_train_raw, classifier_val_raw, classifier_test_raw = dataset[9:]
     print("Loaded dataset!")
 
-    while True: 
-        query = input('ready to train? (y/n)') 
-        response = query[0].lower() 
-        if query == '' or not response in ['y','n']: 
-            print('Please answer with y or n') 
-        else: 
-            break
-    print("Starting to train!")
-
-    '''
-    encoder_path = '1_subjects_seed_55_encoder_8_feat.pth'
-
-    classifier_test = encode_classifier_data(encoder_path=encoder_path, classifier_data_in=classifier_test, encoding=8)
-    classifier_val = encode_classifier_data(encoder_path=encoder_path, classifier_data_in=classifier_val, encoding=8)
-    classifier_train = encode_classifier_data(encoder_path=encoder_path, classifier_data_in=classifier_train, encoding=8)
-    
-    '''
+    num_features = 64 # 64 channels for input features, eeg input
+    if args.encoder_path is not None and '.pth' in args.encoder_path:
+        encoder_path = args.encoder_path
+        classifier_test = encode_classifier_data(encoder_path=encoder_path, classifier_data_in=classifier_test, encoding=args.encoder_features)
+        classifier_val = encode_classifier_data(encoder_path=encoder_path, classifier_data_in=classifier_val, encoding=args.encoder_features)
+        classifier_train = encode_classifier_data(encoder_path=encoder_path, classifier_data_in=classifier_train, encoding=args.encoder_features)
+        print("Using encoded features!")
+        num_features = args.encoder_features
 
     time_window=args.time_window # 100ms, non - overlapping
-    num_features=64 # 64 channels for input features, eeg input
     num_hidden = args.classifier_hidden_size # LSTM parameter, the larger the more complicated the model
     n_classes = args.classifier_classes # number of ouputs for our classifier, split the range [0,1] into n_classes
 
     timestamp_start = time.time()
-    classifier_model = lstm_classifier(num_features=num_features, num_hidden=num_hidden, dropout=0.0, n_labels=n_classes)
+    classifier_model = lstm_classifier(num_features=num_features, num_hidden=num_hidden, dropout=args.classifier_dropout, n_labels=n_classes)
 
-    if args.training_resume_path != '':
+    if args.training_resume_path != None and '.pth' in args.training_resume_path:
         classifier_model.load_state_dict(torch.load(args.training_resume_path))
 
-    model_save_path = args.training_save_path if args.training_save_path != '' else str(int(time.time()*1000.0))+'_raw_classifier_model.pth'
+    model_save_path = args.training_save_path if args.training_save_path != None and '.pth' in args.training_save_path  else str(int(time.time()*1000.0))+'_raw_classifier_model.pth'
 
     n_epochs=args.training_epochs
     training_lr = 1e-3 if args.training_lr <= 0.0 else args.training_lr
+
+    print("###################################")
+    print("Parameters:")
+    param_dict = {k:v for k,v in vars(args).items()}
+    param_dict['data_split_seed'] = random_seed
+    param_dict['subject_seed'] = subject_choice_seed
+
+    with open(model_save_path.replace('.pth','.json'), 'w') as fp:
+        json.dump(param_dict, fp)
+    print(param_dict)
+
+
+    while True and not args.skip_prompt: 
+        query = input('ready to train? (y/n)') 
+        response = query[0].lower() 
+        if query == '' or not response in ['y']: 
+            print('Please answer with y to start training') 
+        else: 
+            break
+    print("###################################")
+    print("###################################")
+    print("Starting to train!")
 
     train_metrics, test_metrics = train(classifier_model, n_epochs, batch_size=args.training_batch_size, learning_rate=training_lr, train_split=classifier_train, test_split=classifier_val, n_labels=n_classes)
 
 
     total_time = time.time() - timestamp_start
-    print("Total time(s): {total_time}")
+    print("###################################")
+    print("###################################")
+    print("Finished Training!")
+    print(f"Total time(s): {total_time}")
     torch.save(classifier_model.state_dict(), model_save_path)
-    print("Saved trained model to: {model_save_path}")
+    print(f"Saved trained model to: {model_save_path}")
 
 
     # Final evaluate
@@ -260,20 +281,23 @@ if __name__ == "__main__":
 
 
     prf = precision_recall_fscore_support(labels, np.array([x.argmax() for x in preds]), average='macro', zero_division=0)
+    print("###################################")
+    print("Metrics:")
     print(f"Precision: {prf[0]}")
     print(f"Recall: {prf[1]}")
     print(f"F1-Score: {prf[2]}")
 
 
     # Output confusion matrix
-    # fig, axs = plt.subplots(figsize=(20,20), dpi=120)
-    # axs.set_title("LSTM Feel Trace Model Confusion Matrix", fontsize=20)
-    # axs.set_xlabel("Predicted Label", fontsize=15)
-    # axs.set_ylabel("True Label", fontsize=15)
+    fig, axs = plt.subplots(figsize=(20,20), dpi=120)
+    axs.set_title("LSTM Feel Trace (State) Model Confusion Matrix", fontsize=20)
+    axs.set_xlabel("Predicted Label", fontsize=15)
+    axs.set_ylabel("True Label", fontsize=15)
 
-    # cm = confusion_matrix(labels, [x.argmax() for x in preds], labels=np.arange(n_classes), normalize='true')
-    # disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=np.arange(n_classes))
+    cm = confusion_matrix(labels, [x.argmax() for x in preds], labels=np.arange(n_classes), normalize='true')
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=np.arange(n_classes))
 
-    # disp.plot(ax=axs)
+    disp.plot(ax=axs)
+    fig.savefig(model_save_path.replace('.pth','.png'))
     # plt.show()
     
