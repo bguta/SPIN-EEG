@@ -10,5 +10,5 @@
 *.zip
 */__pycache__/*
 *.pth
-Experiments/*.png
-Experiments/*.json
+Experiments/results/*.png
+Experiments/results/*.json

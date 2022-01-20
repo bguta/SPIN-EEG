@@ -8,6 +8,9 @@ import joblib
 from tqdm import tqdm
 from joblib import Parallel, delayed
 
+# EEG preprocessing and filtering
+import mne
+from mne.preprocessing import ICA
 
 
 @contextlib.contextmanager
@@ -30,12 +33,32 @@ def tqdm_joblib(tqdm_object):
         tqdm_object.close()
 
 
-def normalize_and_crop(eeg: np.array, ft: np.array) -> tuple:
+def filter_normalize_and_crop(eeg: np.array, ft: np.array) -> tuple:
     """
+    EEG -> Apply a notch filter at 60Hz, remove eye blinks through ICA, crop and normalize between [0,1]
+    Feel Trace -> crop and normalize between [0,1]
+
     :param eeg:
     :param ft:
     :return:
     """
+    channel_names = [ 'E' + str(i+1) for i in range(64)] + ['Cz']
+    sampling_rate = 1000 # Hz
+    ch_types = 'eeg'
+    info = mne.create_info(channel_names, sampling_rate, ch_types)
+
+    # load eeg into mne package
+    montage = mne.channels.make_standard_montage('GSN-HydroCel-65_1.0')
+    raw = mne.io.RawArray(eeg[:, 1:].transpose()/(10 ** 6), info) # divide by 10^6 since uV
+    raw.set_montage(montage)
+    raw.set_channel_types({'E62': 'eog'})
+    raw.drop_channels('Cz')
+    # notch 60Hz
+    raw.notch_filter(np.arange(60, 301, 60), filter_length='auto',phase='zero')
+    # keep only 1 to 250Hz signals
+    # raw.filter(1, 250, picks=['eeg'])
+
+    # crop feel trace and eeg
     min_index = np.where(ft[:, 0] >= 0)[0][0]  # first positive time stamp
     max_index = int(min(eeg[:, 0][-2], ft[:, 0][-1]))
     # find the index on ft that is greater than or equal to the max index timestamp
@@ -43,16 +66,27 @@ def normalize_and_crop(eeg: np.array, ft: np.array) -> tuple:
         np.where(ft[:, 0] == max_index)[0][0]
 
     new_ft = ft[min_index:ft_end_index + 1, :].copy()
-    new_eeg = eeg[int(ft[:, 0][min_index]):max_index + 1, :-1].copy()
+    new_eeg = eeg[int(ft[:, 0][min_index]):max_index + 1, :-1].copy() # crop and drop last channel
+    raw.crop(new_eeg[0,0]/1000, new_eeg[-1,0]/1000)  # ms to seconds
+
+    # EOG artifact removal through ICA
+    ica = ICA(n_components=15)
+    ica.fit(raw)
+    ica.plot_components(show=False)
+
+    eog_indices, eog_scores = ica.find_bads_eog(raw, ch_name='E62', measure='correlation', threshold=0.5)
+    ica.exclude = eog_indices
+    ica.apply(raw)
+    new_eeg[:, 1:] = raw.get_data().transpose().copy()
+
 
     # normalize to be between [0,1]
-    min_eeg = np.min(new_eeg[:, 1:], axis=0)
-    max_eeg = np.max(new_eeg[:, 1:], axis=0)
+    # normalize with mean 0 and variance 1
 
     min_ft = 0
     max_ft = 225
 
-    new_eeg[:, 1:] = (new_eeg[:, 1:] - min_eeg) / (max_eeg - min_eeg)
+    new_eeg[:, 1:] = (new_eeg[:, 1:] - new_eeg[:, 1:].mean(axis=0)) / (new_eeg[:, 1:].std(axis=0)) # z-score normalization
     new_ft[:, 1] = (new_ft[:, 1] - min_ft) / (max_ft - min_ft)
 
     new_ft[:, 0] = new_ft[:, 0] / 1000  # ms to seconds
@@ -61,9 +95,11 @@ def normalize_and_crop(eeg: np.array, ft: np.array) -> tuple:
     return new_eeg, new_ft
 
 
-def create_dataset(src_dir: str, out_dir = 'EEG_FT_DATA') -> None:
+def create_dataset(src_dir: str, out_dir = 'EEG_FT_DATA', num_workers=2) -> None:
     """
     :param src_dir: the directory containing all the EEG and FeelTrace data in folders for each subject
+    :param out_dir: output directory to write to
+    :param num_workers: number of parallel processes to run
 
     Creates the normalized and cropped dataset in the EEG_FT_DATA directory, throws an error if
     EEG_FT_DATA does not exist
@@ -79,7 +115,7 @@ def create_dataset(src_dir: str, out_dir = 'EEG_FT_DATA') -> None:
     eeg_ft_pairs = [(eeg, ft) for eeg, ft in zip(all_eeg_data, all_joystick_data)]
 
     with tqdm_joblib(tqdm(desc="Dataset Creation", total=len(eeg_ft_pairs))) as progress_bar:
-        Parallel(n_jobs=8)(delayed(write_to_csv_dataset_loop)(i, x, y, out_dir) for i, (x, y) in enumerate(eeg_ft_pairs))
+        Parallel(n_jobs=num_workers)(delayed(write_to_csv_dataset_loop)(i, x, y, out_dir) for i, (x, y) in enumerate(eeg_ft_pairs))
     print(f'Created dataset initial dataset csv in {out_dir}')
 
 
@@ -95,7 +131,7 @@ def write_to_csv_dataset_loop(index: int, x: str, y: str, out_dir) -> None:
     ft_column_headers = ['t', 'stress']
 
     eeg, ft = sp_io.loadmat(x)['var'], sp_io.loadmat(y)['var']
-    normalized_eeg, normalized_ft = normalize_and_crop(eeg, ft)
+    normalized_eeg, normalized_ft = filter_normalize_and_crop(eeg, ft)
 
     eeg_df = pd.DataFrame(data=normalized_eeg, columns=eeg_column_headers)
     ft_df = pd.DataFrame(data=normalized_ft, columns=ft_column_headers)
