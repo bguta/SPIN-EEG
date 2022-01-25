@@ -6,8 +6,7 @@ import sys
 import torch.nn as nn
 import torch.nn.functional as F
 import torch
-from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
-from sklearn.metrics import precision_recall_fscore_support
+from sklearn.metrics.pairwise import cosine_similarity
 
 from tqdm import tqdm
 import time
@@ -43,6 +42,7 @@ def train(model, num_epochs, batch_size, learning_rate, train_split, test_split)
         
         # reset metrics
         cur_train_loss = 0 # loss
+        cur_train_sim = 0 # cosine similarity
         
         # set to train mode
         model.train()
@@ -62,19 +62,22 @@ def train(model, num_epochs, batch_size, learning_rate, train_split, test_split)
 
             # metrics
             cur_train_loss += loss.detach().cpu()
+            cur_train_sim += cosine_similarity(y.detach().cpu().numpy(), y_hat.detach().cpu().numpy()).diagonal().mean()
             scheduler.step()
         
         # average metrics over loop
         train_loop_size = len(train_loader)
         cur_train_loss = cur_train_loss/train_loop_size
+        cur_train_sim = cur_train_sim/train_loop_size
         
         
-        train_metrics.append([cur_train_loss])
+        train_metrics.append([cur_train_loss, cur_train_sim])
         
         with torch.no_grad():
             
             # reset metrics
             cur_test_loss = 0 # loss
+            cur_test_sim = 0 # cosine similarity
             
             # set to evaluate mode, ignores dropout
             model.eval()
@@ -90,17 +93,21 @@ def train(model, num_epochs, batch_size, learning_rate, train_split, test_split)
                 
                 # metrics
                 cur_test_loss += loss.detach().cpu()
+                cur_test_sim += cosine_similarity(y.detach().cpu().numpy(), y_hat.detach().cpu().numpy()).diagonal().mean()
                 
                 
             # average metrics over loop
             test_loop_size = len(test_loader)
             cur_test_loss = cur_test_loss/test_loop_size
+            cur_test_sim = cur_test_sim/test_loop_size
         
             test_metrics.append([cur_test_loss])
             
         print(f'Epoch:{epoch+1},'\
               f'\nTrain Loss:{cur_train_loss},'\
-              f'\nTest Loss:{cur_test_loss},')
+              f'\nTrain Cosine Similarity:{cur_train_sim},'\
+              f'\nTest Loss:{cur_test_loss},'\
+              f'\nTest Cosine Similarity:{cur_test_sim},')
         
     return train_metrics, test_metrics
 
@@ -113,7 +120,7 @@ if __name__ == "__main__":
     argparser.add_argument('--num_subjects',  type=int, default=1, help='Number of subjects to include in the dataset, minimum and default is 1 and maximum is 15. Loading large number of users may fail due to memory limitations')
     argparser.add_argument('--subject_seed',  type=int, default=-1, help='Integer seed for choosing the subjects, if -1 uses a random number')
     argparser.add_argument('--eeg_low_pass', type=int, default=None, help='-3 dB point frequency (Hz) for non-causal low pass filter, by default no filter is applied')
-    argparser.add_argument('--encoder_feature_size',  type=int, default=8, help='Integer Autoencoder encoding size default value is 8, the larger the more complicated the model')
+    argparser.add_argument('--encoder_features',  type=int, default=8, help='Integer Autoencoder encoding size default value is 8, the larger the more complicated the model')
 
     argparser.add_argument('--training_epochs',  type=int, default=50, help='Integer epochs for training default 50')
     argparser.add_argument('--training_batch_size',  type=int, default=512, help='Integer batch size for each input during default 512')
@@ -144,11 +151,16 @@ if __name__ == "__main__":
     dataset = load_and_split_dataset(eeg_ft_dir = args.eeg_dir, split_size=args.time_window, cutoff_lf=cutoff_lf, random_seed=random_seed, num_subjects = num_subjects, subject_choice_seed=subject_choice_seed)
 
     autoencoder_train, autoencoder_val, autoencoder_test = dataset[:3]
-    autoencoder_train_raw, autoencoder_val_raw, autoencoder_test_raw = dataset[3:6]
+
+    # zscore normalization across time for each channel
+    autoencoder_train[:,:,2:] = (autoencoder_train[:,:,2:] - autoencoder_train[:,:,2:].mean(axis=1, keepdims=True)) / autoencoder_train[:,:,2:].std(axis=1, keepdims=True)
+    autoencoder_val[:,:,2:] = (autoencoder_val[:,:,2:] - autoencoder_val[:,:,2:].mean(axis=1, keepdims=True)) / autoencoder_val[:,:,2:].std(axis=1, keepdims=True)
+    autoencoder_test[:,:,2:] = (autoencoder_test[:,:,2:] - autoencoder_test[:,:,2:].mean(axis=1, keepdims=True)) / autoencoder_test[:,:,2:].std(axis=1, keepdims=True)
+
     print("Loaded dataset!")
 
     time_window=args.time_window # 100ms, non - overlapping
-    num_hidden = args.encoder_feature_size # output encoding size
+    num_hidden = args.encoder_features # output encoding size
 
     timestamp_start = time.time()
     encoder_model = autoencoder(num_features=num_hidden)
@@ -156,7 +168,7 @@ if __name__ == "__main__":
     if args.training_resume_path != None and '.pth' in args.training_resume_path:
         encoder_model.load_state_dict(torch.load(args.training_resume_path))
 
-    model_save_path = args.training_save_path if args.training_save_path != None and '.pth' in args.training_save_path  else str(int(time.time()*1000.0))+'_encoder_model.pth'
+    model_save_path = args.training_save_path if args.training_save_path != None and '.pth' in args.training_save_path  else os.path.join('results',str(int(time.time()*1000.0))+'_encoder_model.pth')
 
     n_epochs=args.training_epochs
     training_lr = 1e-3 if args.training_lr <= 0.0 else args.training_lr
@@ -166,9 +178,6 @@ if __name__ == "__main__":
     param_dict = {k:v for k,v in vars(args).items()}
     param_dict['data_split_seed'] = random_seed
     param_dict['subject_seed'] = subject_choice_seed
-
-    with open(model_save_path.replace('.pth','.json'), 'w') as fp:
-        json.dump(param_dict, fp)
     print(param_dict)
 
     while True and not args.skip_prompt: 
@@ -178,6 +187,9 @@ if __name__ == "__main__":
             print('Please answer with y to start training') 
         else: 
             break
+
+    with open(model_save_path.replace('.pth','.json'), 'w') as fp:
+        json.dump(param_dict, fp)
     print("###################################")
     print("###################################")
     print("Starting to train!")
@@ -206,12 +218,26 @@ if __name__ == "__main__":
         x_encoded = encoder_model(x).reshape(prev_shape[0], prev_shape[1], 64).detach().cpu().numpy().squeeze()
 
         print(f"Test Mean Square Error: {((autoencoder_test[:,:,2:] - x_encoded)**2).mean()}")
+    
+        x_eeg = autoencoder_test[:,:,2:].reshape(-1,64)
+        y_eeg = x_encoded.reshape(-1,64)
+        chunk_size = 1000
+        eeg_size = y_eeg.shape[0]
+        
+        def similarity_cosine_by_chunk(start, end):
+            if end > eeg_size:
+                end = eeg_size
+            return cosine_similarity(X=x_eeg[start:end], Y=y_eeg[start:end]).diagonal().mean()
+        cos_sim = []
+        for chunk_start in range(0, eeg_size, chunk_size):
+            cos_sim.append(similarity_cosine_by_chunk(chunk_start, chunk_start+chunk_size))
+
+        print(f"Test Cosine Similarity: {sum(cos_sim)/len(cos_sim)}")
 
         for data_index in range(64):
             t = autoencoder_test[:, :, 0].flatten()
             ind_t = np.argsort(t)
             t = t[ind_t]
-            z_raw = autoencoder_test_raw[:, :, data_index+2].flatten()[ind_t]
             z = autoencoder_test[:, :, data_index+2].flatten()[ind_t]
             z_hat = x_encoded[:, :, data_index].flatten()[ind_t]
 

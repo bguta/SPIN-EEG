@@ -21,6 +21,7 @@ def train(model, num_epochs, batch_size, learning_rate, train_split, test_split,
     model.to(device)
     
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100, eta_min=1e-8)
 
     criterion = nn.CrossEntropyLoss()
     train_dataset = classifier_dataset_transition(train_split, n_labels=n_labels)
@@ -84,6 +85,7 @@ def train(model, num_epochs, batch_size, learning_rate, train_split, test_split,
             y_np = y.detach().cpu().numpy().squeeze().reshape(-1,) # labels
             
             # metrics
+            scheduler.step()
             prf = precision_recall_fscore_support(y_np, y_hat_np, average='macro', zero_division=0)
             
             cur_train_acc += np.mean(y_hat_np == y_np)
@@ -91,6 +93,7 @@ def train(model, num_epochs, batch_size, learning_rate, train_split, test_split,
             cur_train_rc += prf[1]
             cur_train_f1 += prf[2]
             cur_train_loss += loss.detach().cpu()
+            
         
         # average metrics over loop
         train_loop_size = len(train_loader)
@@ -208,7 +211,12 @@ if __name__ == "__main__":
     dataset = load_and_split_dataset(eeg_ft_dir = args.eeg_dir, split_size=args.time_window, cutoff_lf=cutoff_lf, random_seed=random_seed, num_subjects = num_subjects, subject_choice_seed=subject_choice_seed)
 
     classifier_train, classifier_val, classifier_test = dataset[6:9]
-    classifier_train_raw, classifier_val_raw, classifier_test_raw = dataset[9:]
+
+    # zscore normalization across time for each channel
+    classifier_train[:,:,2:] = (classifier_train[:,:,2:] - classifier_train[:,:,2:].mean(axis=1, keepdims=True)) / classifier_train[:,:,2:].std(axis=1, keepdims=True)
+    classifier_val[:,:,2:] = (classifier_val[:,:,2:] - classifier_val[:,:,2:].mean(axis=1, keepdims=True)) / classifier_val[:,:,2:].std(axis=1, keepdims=True)
+    classifier_test[:,:,2:] = (classifier_test[:,:,2:] - classifier_test[:,:,2:].mean(axis=1, keepdims=True)) / classifier_test[:,:,2:].std(axis=1, keepdims=True)
+
     print("Loaded dataset!")
 
     num_features = 64 # 64 channels for input features, eeg input
@@ -230,7 +238,7 @@ if __name__ == "__main__":
     if args.training_resume_path != None and '.pth' in args.training_resume_path:
         classifier_model.load_state_dict(torch.load(args.training_resume_path))
 
-    model_save_path = args.training_save_path if args.training_save_path != None and '.pth' in args.training_save_path else str(int(time.time()*1000.0))+'_raw_classifier_transition_model.pth'
+    model_save_path = args.training_save_path if args.training_save_path != None and '.pth' in args.training_save_path else os.path.join('results',str(int(time.time()*1000.0))+'_raw_classifier_transition_model.pth')
 
     n_epochs=args.training_epochs
     training_lr = 1e-3 if args.training_lr <= 0.0 else args.training_lr
@@ -240,9 +248,6 @@ if __name__ == "__main__":
     param_dict = {k:v for k,v in vars(args).items()}
     param_dict['data_split_seed'] = random_seed
     param_dict['subject_seed'] = subject_choice_seed
-
-    with open(model_save_path.replace('.pth','.json'), 'w') as fp:
-        json.dump(param_dict, fp)
     print(param_dict)
 
 
@@ -253,6 +258,8 @@ if __name__ == "__main__":
             print('Please answer with y to start training') 
         else: 
             break
+    with open(model_save_path.replace('.pth','.json'), 'w') as fp:
+        json.dump(param_dict, fp)
     print("###################################")
     print("###################################")
     print("Starting to train!")
@@ -268,12 +275,12 @@ if __name__ == "__main__":
     torch.save(classifier_model.state_dict(), model_save_path)
     print(f"Saved trained model to: {model_save_path}")
 
-
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     # Final evaluate
     with torch.no_grad():
         classifier_model.eval()
-        x_encoded  = torch.from_numpy(classifier_test[:,:,2:]).float().cuda() # eeg channels
-        y = stress_2_label_transition(classifier_test[:,:,1].mean(axis=-1), n_classes).astype(int)
+        x_encoded  = torch.from_numpy(classifier_test[:,:,2:]).float().to(device) # eeg channels
+        y = stress_2_label(np.diff(np.take(classifier_test[:,:,1], [0,-1], axis=-1)).squeeze(), n_classes).astype(int)
         y_hat = F.softmax(classifier_model(x_encoded).detach(), dim=-1).cpu().numpy()
         labels = y
         preds = y_hat

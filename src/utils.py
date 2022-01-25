@@ -1,16 +1,16 @@
-import pandas as pd
-import numpy as np
-import scipy.io as sp_io
-import os
-import glob
 import contextlib
-import joblib
-from tqdm import tqdm
-from joblib import Parallel, delayed
+import glob
+import os
 
+import joblib
 # EEG preprocessing and filtering
 import mne
+import numpy as np
+import pandas as pd
+import scipy.io as sp_io
+from joblib import Parallel, delayed
 from mne.preprocessing import ICA
+from tqdm import tqdm
 
 
 @contextlib.contextmanager
@@ -54,7 +54,7 @@ def filter_normalize_and_crop(eeg: np.array, ft: np.array) -> tuple:
     raw.set_channel_types({'E62': 'eog'})
     raw.drop_channels('Cz')
     # notch 60Hz
-    raw.notch_filter(np.arange(60, 301, 60), filter_length='auto',phase='zero')
+    raw.notch_filter(np.arange(60, 301, 60), filter_length='auto', phase='zero')
     # keep only 1 to 250Hz signals
     # raw.filter(1, 250, picks=['eeg'])
 
@@ -86,7 +86,7 @@ def filter_normalize_and_crop(eeg: np.array, ft: np.array) -> tuple:
     min_ft = 0
     max_ft = 225
 
-    new_eeg[:, 1:] = (new_eeg[:, 1:] - new_eeg[:, 1:].mean(axis=0)) / (new_eeg[:, 1:].std(axis=0)) # z-score normalization
+    # new_eeg[:, 1:] = (new_eeg[:, 1:] - new_eeg[:, 1:].mean(axis=0)) / (new_eeg[:, 1:].std(axis=0)) # z-score normalization
     new_ft[:, 1] = (new_ft[:, 1] - min_ft) / (max_ft - min_ft)
 
     new_ft[:, 0] = new_ft[:, 0] / 1000  # ms to seconds

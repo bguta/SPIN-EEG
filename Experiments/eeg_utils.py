@@ -1,12 +1,15 @@
-import numpy as np
-import os
 import glob
-import pandas as pd
-from scipy import signal
+import os
 
+import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from scipy import signal
 from sklearn.model_selection import train_test_split
+from tqdm import tqdm
+
 
 #################################
 #################################
@@ -17,24 +20,30 @@ def split_filtered_and_raw(filtered_data : list, raw_data : list, random_seed=12
     '''
     autoencoder_split, classifier_split = train_test_split(filtered_data, test_size=0.7, random_state=random_seed, shuffle=True)
     del filtered_data
-    autoencoder_split_raw, classifier_split_raw = train_test_split(raw_data, test_size=0.7, random_state=random_seed, shuffle=True)
-    del raw_data
     
     # split data into train and test
     autoencoder_train, autoencoder_test = train_test_split(np.array(autoencoder_split), test_size=0.2, random_state=random_seed, shuffle=True)
-    autoencoder_train_raw, autoencoder_test_raw = train_test_split(np.array(autoencoder_split_raw), test_size=0.2, random_state=random_seed, shuffle=True)
-    
     classifier_train, classifier_test = train_test_split(np.array(classifier_split), test_size=0.2, random_state=random_seed, shuffle=True)
-    classifier_train_raw, classifier_test_raw = train_test_split(np.array(classifier_split_raw), test_size=0.2, random_state=random_seed, shuffle=True)
-
     
     # further split train into validation and train
     autoencoder_train, autoencoder_val = train_test_split(autoencoder_train, test_size=0.2, random_state=random_seed, shuffle=True)
-    autoencoder_train_raw, autoencoder_val_raw = train_test_split(autoencoder_train_raw, test_size=0.2, random_state=random_seed, shuffle=True)
-    
     classifier_train, classifier_val = train_test_split(classifier_train, test_size=0.2, random_state=random_seed, shuffle=True)
-    classifier_train_raw, classifier_val_raw = train_test_split(classifier_train_raw, test_size=0.2, random_state=random_seed, shuffle=True)
-    
+
+    if len(raw_data) > 0: # may be empty
+        autoencoder_split_raw, classifier_split_raw = train_test_split(raw_data, test_size=0.7, random_state=random_seed, shuffle=True)
+        del raw_data
+        autoencoder_train_raw, autoencoder_test_raw = train_test_split(np.array(autoencoder_split_raw), test_size=0.2, random_state=random_seed, shuffle=True)
+        classifier_train_raw, classifier_test_raw = train_test_split(np.array(classifier_split_raw), test_size=0.2, random_state=random_seed, shuffle=True)
+        autoencoder_train_raw, autoencoder_val_raw = train_test_split(autoencoder_train_raw, test_size=0.2, random_state=random_seed, shuffle=True)
+        classifier_train_raw, classifier_val_raw = train_test_split(classifier_train_raw, test_size=0.2, random_state=random_seed, shuffle=True)
+    else: # add dummy data to keep output consistent
+        autoencoder_train_raw = [-1]
+        autoencoder_test_raw = [-1]
+        classifier_train_raw = [-1]
+        classifier_test_raw = [-1]
+        autoencoder_val_raw = [-1]
+        classifier_train_raw = [-1]
+        classifier_val_raw = [-1]
     
     split_dataset = [autoencoder_train, autoencoder_val, autoencoder_test, autoencoder_train_raw, autoencoder_val_raw, autoencoder_test_raw,
                      classifier_train, classifier_val, classifier_test, classifier_train_raw, classifier_val_raw, classifier_test_raw]
@@ -55,12 +64,13 @@ def load_and_split_dataset(eeg_ft_dir = 'ALIGNED_DATA', split_size=100, cutoff_l
         sos = signal.butter(10, cutoff_lf, 'lp', fs=1000, output='sos') # low pass filter
     
     full_dataset = []
-    for x in all_eeg_ft_names:        
+    for x in tqdm(all_eeg_ft_names):       
         dataset = []
         unfiltered = []
         
         input_label_pair = pd.read_csv(x).values
-        input_label_pair_unfiltered = input_label_pair.copy()
+        if cutoff_lf is not None: # copy original to output filtered and raw
+            input_label_pair_unfiltered = input_label_pair.copy()
         
         if cutoff_lf is not None:
             input_label_pair[:,2:] = signal.sosfiltfilt(sos, input_label_pair[:,2:], axis=0)
@@ -69,19 +79,24 @@ def load_and_split_dataset(eeg_ft_dir = 'ALIGNED_DATA', split_size=100, cutoff_l
         
         split_data = np.array_split(input_label_pair, n_chunks).copy()
         del input_label_pair
-        
-        split_data_unfiltered = np.array_split(input_label_pair_unfiltered, n_chunks).copy()   
-        del input_label_pair_unfiltered
+
+        if cutoff_lf is not None:
+            split_data_unfiltered = np.array_split(input_label_pair_unfiltered, n_chunks).copy()   
+            del input_label_pair_unfiltered
         
         for i in range(len(split_data)):
-            x_split, y_split = split_data[i], split_data_unfiltered[i]
+            x_split = split_data[i]
+            if cutoff_lf is not None:
+                y_split = split_data_unfiltered[i]
             if len(x_split) >= split_size:
                 dataset.append(x_split[:split_size]) # append copies by reference
-                unfiltered.append(y_split[:split_size]) # append copies by reference
+                if cutoff_lf is not None:
+                    unfiltered.append(y_split[:split_size]) # append copies by reference
         
         split_dataset = split_filtered_and_raw(dataset, unfiltered, random_seed) # split data into train, validation and test sets
         del split_data
-        del split_data_unfiltered
+        if cutoff_lf is not None:
+            del split_data_unfiltered
         
         if len(full_dataset) > 0:
             for i in range(len(full_dataset)):
@@ -112,8 +127,7 @@ class autoencoder(nn.Module):
         self.decoder = nn.Sequential(
             nn.Linear(num_features, 32),
             nn.ReLU(True),
-            nn.Linear(32, 64),
-            nn.Sigmoid())
+            nn.Linear(32, 64))
 
     def forward(self, x):
         x = self.encoder(x)
@@ -153,6 +167,7 @@ class lstm_classifier(nn.Module):
         self.num_features = num_features
         self.input_size = num_hidden
         self.n_classses = n_labels
+        self.attn = Attention(num_hidden)
         
         self.lstm_1 = nn.LSTM(
             input_size =  self.num_features,
@@ -178,8 +193,35 @@ class lstm_classifier(nn.Module):
     def forward(self,x):
         x, (h_t, c_t) = self.lstm_1(x)
         x, (h_t, c_t) = self.lstm_2(x)
-        x = self.classify(h_t[-1]) # classify last hidden timestep
-        return x
+        x, attn_weights = self.attn(x, h_t.squeeze(0))
+        x = self.classify(x) # classify attn output
+
+        return x, attn_weights
+
+class Attention(nn.Module):
+    def __init__(self, hidden_size):
+        super(Attention, self).__init__()
+        self.hidden_size = hidden_size
+
+        self.concat_linear = nn.Linear(self.hidden_size * 2, self.hidden_size)
+        self.attn = nn.Linear(self.hidden_size, self.hidden_size)
+
+
+    def forward(self, x, ht):
+        # x:  (batch_size, seq_len, hidden_size)
+        # ht: (batch_size, hidden_size)
+
+        batch_size, seq_len, _ = x.shape
+        attn_weights = self.attn(x) # (batch_size, seq_len, hidden_size)
+        attn_weights = torch.bmm(attn_weights, ht.unsqueeze(dim=2))
+
+        attn_weights = F.softmax(attn_weights.squeeze(2), dim=1)
+
+        context = torch.bmm(x.transpose(1, 2), attn_weights.unsqueeze(2)).squeeze(2)
+
+        attn_hidden = torch.tanh(self.concat_linear(torch.cat((context, ht), dim=1)))
+
+        return attn_hidden, attn_weights
 
 #################################
 #################################
@@ -205,6 +247,7 @@ class classifier_dataset(torch.utils.data.Dataset):
         'Generates one sample of data'
         # Select sample
         x = torch.from_numpy(self.x[index,:,2:]).float() # eeg channels
+        #x = (x - x.mean(dim=0)) / x.std(dim=0) # z score normalization
         y = np.array(stress_2_label(self.x[index, :, 1].mean(axis=-1), n_labels=self.n_labels)).astype(int)
         y = torch.from_numpy(y) # feel trace labels int value [0,n_labels]
         return x, y
