@@ -7,3 +7,4 @@ scipy==1.7.1
 tqdm==4.62.3
 mne==0.24.1
 joblib==1.0.1
+pytest==6.2.5

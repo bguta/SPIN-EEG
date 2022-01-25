@@ -1,5 +1,6 @@
 *.csv
 *.mat
+.pytest_cache
 /__pycache__/
 .idea
 /RAW_EEG/*.csv
