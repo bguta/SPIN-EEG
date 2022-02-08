@@ -13,3 +13,4 @@
 *.pth
 Experiments/results/*.png
 Experiments/results/*.json
+*.json
